@@ -9,16 +9,18 @@ import shutil
 # --- CLOUD CONFIG ---
 pytesseract.pytesseract.tesseract_cmd = shutil.which("tesseract") or "/usr/bin/tesseract"
 
+# --- UI SETUP ---
 st.set_page_config(page_title="Gobseck ABG Pro", page_icon="🩸")
 
 st.title("🩸 Gobseck ABG Engine")
 st.caption("Docent Dr. Pektezel's Professional Clinical Tool")
 
+# UPGRADE 1: Expanded Regex to catch zero/O confusion and cut-off subscripts
 patterns = {
     'ph': [r'pH', r'p\.H', r'PH'],
-    'pco2': [r'pCO2', r'PCO2', r'pCOz', r'pCO', r'PCO'],
+    'pco2': [r'pCO2', r'PCO2', r'pCOz', r'pCO', r'PCO', r'pC02', r'pC0'],
     'hco3': [r'cHCO3', r'HCO3', r'HCO', r'act\.HCO'],
-    'po2': [r'pO2', r'PO2', r'pO', r'pOz', r'PO'],
+    'po2': [r'pO2', r'PO2', r'pO', r'pOz', r'PO', r'p02'],
     'na': [r'Na\+', r'Sodium', r'Na', r'NA'],
     'cl': [r'Cl-', r'Chloride', r'Cl', r'CL'],
     'lactate': [r'Lactate', r'Lac', r'Laktat'],
@@ -26,19 +28,19 @@ patterns = {
 }
 
 def clean_clinical_image(image):
-    """Gentle filter optimized for halftone/dithered thermal prints."""
+    """Uses Medical CLAHE to enhance contrast without destroying the background."""
+    # 1. Grayscale
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
-    # 1. Upscale to give Tesseract more pixel density for thin fonts
-    gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    # 2. Upscale for OCR density using Lanczos (sharper than Cubic)
+    gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_LANCZOS4)
     
-    # 2. Gentle blur to melt the halftone printer dots together
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    # 3. Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    enhanced = clahe.apply(gray)
     
-    # 3. Automatic thresholding (Otsu calculates optimal light balance dynamically)
-    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
-    return thresh
+    # Notice we return the grayscale directly. No thresholding/binarization!
+    return enhanced
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -53,32 +55,34 @@ uploaded_file = st.file_uploader("Upload or Take Photo of ABG", type=['jpg', 'jp
 
 if uploaded_file is not None:
     with st.spinner("Decoding Clinical Values..."):
+        # Load image and correct mobile EXIF rotation
         img = Image.open(uploaded_file)
         img = ImageOps.exif_transpose(img) 
         
         frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
         processed = clean_clinical_image(frame)
         
-        # PSM 6 works best when the background noise is successfully removed
+        # UPGRADE 2: PSM 6 is optimal for clean grayscale blocks
         text = pytesseract.image_to_string(processed, config='--oem 3 --psm 6')
         
         d = {k: None for k in patterns.keys()}
         for key, regs in patterns.items():
             for r in regs:
-                # Upgraded Regex: Catches both dots and commas, filters out OCR noise
+                # Upgraded Regex: Catches dots, commas, and heavy OCR noise
                 m = re.search(r + r'[\s:=,\|\~_*\-]*([-+]?\d+[\.,]\d+|\d+)', text, re.IGNORECASE)
                 if m: 
-                    # Replace European comma with Python dot for float conversion
                     clean_number = m.group(1).replace(',', '.')
                     d[key] = float(clean_number)
                     break
 
+        # --- MATH GATEKEEPER ---
         if d['ph'] is None or d['pco2'] is None:
             st.error("❌ OCR missed primary values (pH or pCO2).")
             with st.expander("Machine Vision Debugger - View Raw Output"):
-                st.image(processed, caption="Ensure the text is black and the background is mostly white.")
+                st.image(processed, caption="CLAHE Enhanced Grayscale")
                 st.text("Raw Text Found by OCR:\n" + text)
         else:
+            # Map safe fallbacks for secondary values
             ph = d['ph']
             pco2 = d['pco2']
             hco3 = d['hco3'] if d['hco3'] is not None else 24.0
