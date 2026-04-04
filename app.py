@@ -26,23 +26,62 @@ patterns = {
 }
 
 def clean_clinical_image(image):
-    """Engineered specifically to defeat screen Moiré patterns from monitor photos."""
+    """The 'Naked' LSTM approach. Let Tesseract's neural net handle the screen grid."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
-    # 1. Median Blur: The ultimate Moiré killer. It destroys the monitor's pixel grid.
-    grid_killed = cv2.medianBlur(gray, 3)
+    # 1. Upscale using high-quality Lanczos interpolation (keeps text sharp)
+    scaled = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_LANCZOS4)
     
-    # 2. Upscale to give Tesseract higher density on the text
-    upscaled = cv2.resize(grid_killed, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    # 2. A very slight blur to soften the monitor's pixel grid
+    blur = cv2.GaussianBlur(scaled, (3, 3), 0)
     
-    # 3. Sharpen: Restores the crisp edges of the letters that the blur softened
-    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-    sharpened = cv2.filter2D(upscaled, -1, kernel)
+    # 3. Notice we return the grayscale directly. No thresholding/binarization!
+    return blur
+
+def analyze_acid_base(ph, pco2, hco3):
+    """The Gobseck Diagnostic Core: Evaluates primary disorders and compensations."""
+    report = []
     
-    # 4. Otsu Threshold: Finds the perfect pure black/white balance automatically
-    _, thresh = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Bleich Rule
+    expected_h = 24 * (pco2 / hco3) if hco3 else 0
+    expected_ph = 9.0 - np.log10(expected_h) if expected_h > 0 else 7.4
     
-    return thresh
+    if abs(ph - expected_ph) > 0.05:
+        report.append("⚠️ **Bleich Rule Failed:** Suspect venous sample or lab error.")
+    else:
+        report.append("✅ **Bleich Rule Passed:** Data is internally consistent.")
+
+    # Primary & Compensation Logic
+    if ph < 7.36:
+        if hco3 < 22:
+            report.append("🩸 **Primary:** Metabolic Acidosis")
+            exp_pco2 = (1.5 * hco3) + 8
+            if pco2 < (exp_pco2 - 2):
+                report.append(f"🔍 **Mixed:** Concomitant Respiratory Alkalosis (Exp. pCO2: {exp_pco2:.1f} ±2)")
+            elif pco2 > (exp_pco2 + 2):
+                report.append(f"🔍 **Mixed:** Concomitant Respiratory Acidosis (Exp. pCO2: {exp_pco2:.1f} ±2)")
+            else:
+                report.append("Adequate respiratory compensation.")
+        elif pco2 > 44:
+            report.append("🫁 **Primary:** Respiratory Acidosis")
+            report.append(f"Expected HCO3 (Acute): {24 + ((pco2 - 40) / 10):.1f} | (Chronic): {24 + 4 * ((pco2 - 40) / 10):.1f}")
+    elif ph > 7.44:
+        if hco3 > 26:
+            report.append("🩸 **Primary:** Metabolic Alkalosis")
+            exp_pco2 = (0.7 * hco3) + 21
+            if pco2 > (exp_pco2 + 2):
+                report.append(f"🔍 **Mixed:** Concomitant Respiratory Acidosis (Exp. pCO2: {exp_pco2:.1f} ±2)")
+            elif pco2 < (exp_pco2 - 2):
+                report.append(f"🔍 **Mixed:** Concomitant Respiratory Alkalosis (Exp. pCO2: {exp_pco2:.1f} ±2)")
+            else:
+                report.append("Adequate respiratory compensation.")
+        elif pco2 < 36:
+            report.append("🫁 **Primary:** Respiratory Alkalosis")
+            report.append(f"Expected HCO3 (Acute): {24 - 2 * ((40 - pco2) / 10):.1f} | (Chronic): {24 - 5 * ((40 - pco2) / 10):.1f}")
+    else:
+        report.append("Normal pH. Check Anion Gap and Stewart cBE for occult metabolic disorders.")
+
+    return report
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -52,7 +91,7 @@ with st.sidebar:
     alb = st.number_input("Albumin (g/dL)", value=4.0)
 
 # --- NATIVE CAPTURE ---
-st.info("Taking a photo of a screen? Keep the phone perfectly parallel to the monitor.")
+st.info("Tap 'Browse files' -> 'Camera'. Keep the phone steady.")
 uploaded_file = st.file_uploader("Upload or Take Photo of ABG", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file is not None:
@@ -63,24 +102,22 @@ if uploaded_file is not None:
         frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
         processed = clean_clinical_image(frame)
         
-        # PSM 6 is optimal for clean, unified blocks of text
-        text = pytesseract.image_to_string(processed, config='--oem 3 --psm 6')
+        # PSM 4 is highly resilient to columns and spacing
+        text = pytesseract.image_to_string(processed, config='--oem 3 --psm 4')
         
         d = {k: None for k in patterns.keys()}
         for key, regs in patterns.items():
             for r in regs:
-                # Catch decimals, commas, and heavy spacing
                 m = re.search(r + r'[\s:=,\|\~_*\-]*([-+]?\d+[\.,]\d+|\d+)', text, re.IGNORECASE)
                 if m: 
-                    clean_number = m.group(1).replace(',', '.')
-                    d[key] = float(clean_number)
+                    d[key] = float(m.group(1).replace(',', '.'))
                     break
 
         # --- MATH GATEKEEPER ---
         if d['ph'] is None or d['pco2'] is None:
             st.error("❌ OCR missed primary values (pH or pCO2).")
             with st.expander("Machine Vision Debugger"):
-                st.image(processed, caption="If this looks messy, move the phone back slightly to reduce screen grid interference.")
+                st.image(processed, caption="Naked Grayscale View")
                 st.text("Raw Text Found by OCR:\n" + text)
         else:
             ph = d['ph']
@@ -92,18 +129,28 @@ if uploaded_file is not None:
             po2 = d['po2'] if d['po2'] is not None else 90.0
             po4 = d['po4'] if d['po4'] is not None else 3.0
             
-            # Clinical Engine Math
+            # Math
             aa_grad = (((fio2_pct/100) * 713) - (1.2 * pco2)) - po2
             cbe = (na - cl - 38) + (1 - lac) + (4 - alb) * 2.5 + (3 - po4) * 0.6
             ag_corr = (na - (cl + hco3)) + (2.5 * (4.0 - alb))
 
+            # The Gobseck Audit
+            diagnostic_report = analyze_acid_base(ph, pco2, hco3)
+
             # UI Dashboard
             st.success("✅ Analysis Complete")
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             col1.metric("pH", ph)
             col2.metric("pCO2", pco2)
+            col3.metric("HCO3", hco3)
             
             st.divider()
+            st.subheader("📋 Diagnostic Ledger")
+            for line in diagnostic_report:
+                st.write(line)
+            
+            st.divider()
+            st.subheader("🧪 Stewart & Gradients")
             st.write(f"**Stewart cBE:** {cbe:.2f} mmol/L")
-            st.write(f"**A-a Gradient:** {aa_grad:.1f} mmHg")
+            st.write(f"**A-a Gradient:** {aa_grad:.1f} mmHg (Exp: <{(age+10)/4:.1f})")
             st.write(f"**Anion Gap (Corr):** {ag_corr:.1f} mmol/L")
