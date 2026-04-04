@@ -9,16 +9,14 @@ import shutil
 # --- CLOUD CONFIG ---
 pytesseract.pytesseract.tesseract_cmd = shutil.which("tesseract") or "/usr/bin/tesseract"
 
-# --- UI SETUP ---
 st.set_page_config(page_title="Gobseck ABG Pro", page_icon="🩸")
 
 st.title("🩸 Gobseck ABG Engine")
 st.caption("Docent Dr. Pektezel's Professional Clinical Tool")
 
-# UPGRADE 1: Expanded Regex to catch zero/O confusion and cut-off subscripts
 patterns = {
     'ph': [r'pH', r'p\.H', r'PH'],
-    'pco2': [r'pCO2', r'PCO2', r'pCOz', r'pCO', r'PCO', r'pC02', r'pC0'],
+    'pco2': [r'pCO2', r'PCO2', r'pCOz', r'pCO', r'PCO', r'pC02', r'pC0', r'pCO;'],
     'hco3': [r'cHCO3', r'HCO3', r'HCO', r'act\.HCO'],
     'po2': [r'pO2', r'PO2', r'pO', r'pOz', r'PO', r'p02'],
     'na': [r'Na\+', r'Sodium', r'Na', r'NA'],
@@ -28,19 +26,23 @@ patterns = {
 }
 
 def clean_clinical_image(image):
-    """Uses Medical CLAHE to enhance contrast without destroying the background."""
-    # 1. Grayscale
+    """Engineered specifically to defeat screen Moiré patterns from monitor photos."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
-    # 2. Upscale for OCR density using Lanczos (sharper than Cubic)
-    gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_LANCZOS4)
+    # 1. Median Blur: The ultimate Moiré killer. It destroys the monitor's pixel grid.
+    grid_killed = cv2.medianBlur(gray, 3)
     
-    # 3. Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    enhanced = clahe.apply(gray)
+    # 2. Upscale to give Tesseract higher density on the text
+    upscaled = cv2.resize(grid_killed, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
     
-    # Notice we return the grayscale directly. No thresholding/binarization!
-    return enhanced
+    # 3. Sharpen: Restores the crisp edges of the letters that the blur softened
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+    sharpened = cv2.filter2D(upscaled, -1, kernel)
+    
+    # 4. Otsu Threshold: Finds the perfect pure black/white balance automatically
+    _, thresh = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    return thresh
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -50,25 +52,24 @@ with st.sidebar:
     alb = st.number_input("Albumin (g/dL)", value=4.0)
 
 # --- NATIVE CAPTURE ---
-st.info("Tap 'Browse files' -> 'Camera'. Keep the paper flat and steady.")
+st.info("Taking a photo of a screen? Keep the phone perfectly parallel to the monitor.")
 uploaded_file = st.file_uploader("Upload or Take Photo of ABG", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file is not None:
-    with st.spinner("Decoding Clinical Values..."):
-        # Load image and correct mobile EXIF rotation
+    with st.spinner("Decoding Screen Capture..."):
         img = Image.open(uploaded_file)
         img = ImageOps.exif_transpose(img) 
         
         frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
         processed = clean_clinical_image(frame)
         
-        # UPGRADE 2: PSM 6 is optimal for clean grayscale blocks
+        # PSM 6 is optimal for clean, unified blocks of text
         text = pytesseract.image_to_string(processed, config='--oem 3 --psm 6')
         
         d = {k: None for k in patterns.keys()}
         for key, regs in patterns.items():
             for r in regs:
-                # Upgraded Regex: Catches dots, commas, and heavy OCR noise
+                # Catch decimals, commas, and heavy spacing
                 m = re.search(r + r'[\s:=,\|\~_*\-]*([-+]?\d+[\.,]\d+|\d+)', text, re.IGNORECASE)
                 if m: 
                     clean_number = m.group(1).replace(',', '.')
@@ -78,11 +79,10 @@ if uploaded_file is not None:
         # --- MATH GATEKEEPER ---
         if d['ph'] is None or d['pco2'] is None:
             st.error("❌ OCR missed primary values (pH or pCO2).")
-            with st.expander("Machine Vision Debugger - View Raw Output"):
-                st.image(processed, caption="CLAHE Enhanced Grayscale")
+            with st.expander("Machine Vision Debugger"):
+                st.image(processed, caption="If this looks messy, move the phone back slightly to reduce screen grid interference.")
                 st.text("Raw Text Found by OCR:\n" + text)
         else:
-            # Map safe fallbacks for secondary values
             ph = d['ph']
             pco2 = d['pco2']
             hco3 = d['hco3'] if d['hco3'] is not None else 24.0
