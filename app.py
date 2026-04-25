@@ -24,7 +24,8 @@ patterns = {
     'na': [r'Na\+', r'Sodium', r'Na', r'NA'],
     'cl': [r'Cl-', r'Chloride', r'Cl', r'CL', r'C3'],
     'lactate': [r'Lactate', r'Lac', r'Laktat'],
-    'po4': [r'PO4', r'Phosphate', r'Fosfat']
+    'po4': [r'PO4', r'Phosphate', r'Fosfat'],
+    'cbe': [r'cBase\s*\(Ecf\)', r'cBE', r'BE\(B\)', r'BE', r'Base\s*Excess', r'Baz\s*Fazlas']
 }
 
 # --- GÖRÜNTÜ İŞLEME ---
@@ -33,7 +34,7 @@ def clean_clinical_image(image):
     scaled = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_LANCZOS4)
     return cv2.GaussianBlur(scaled, (3, 3), 0)
 
-# --- GOBSECK KLİNİK TANI MOTORU (WINTERS, BLEICH, KOMPANZASYON) ---
+# --- KLİNİK TANI MOTORU (WINTERS, BLEICH, KOMPANZASYON) ---
 def analyze_acid_base(ph, pco2, hco3):
     report = []
     
@@ -83,13 +84,12 @@ with st.sidebar:
     st.header("Hasta Verileri")
     age = st.number_input("Yaş", value=60)
     fio2_pct = st.number_input("FiO2 (%)", value=21)
-    alb = st.number_input("Albumin (g/dL)", value=4.0)
+    alb = st.number_input("Albumin (g/dL)", value=4.0, step=0.1)
 
 # --- MOBİL KAMERA & DOSYA YÜKLEME ---
 st.info("Kamerayı açmak için 'Browse files' -> 'Kamera' seçeneğine dokunun.")
 uploaded_file = st.file_uploader("ABG Fişini Yükle veya Fotoğrafını Çek", type=['jpg', 'jpeg', 'png'])
 
-# Sözlük başlangıcı (Hata vermemesi için globalde tanımlıyoruz)
 d = {k: None for k in patterns.keys()}
 
 if uploaded_file is not None:
@@ -109,7 +109,6 @@ if uploaded_file is not None:
                     clean_number = m.group(1).replace(',', '.')
                     val = float(clean_number)
                     
-                    # pH için otomatik ondalık düzeltici
                     if key == 'ph':
                         if val > 600 and val < 800: val = val / 100
                         elif val > 6000 and val < 8000: val = val / 1000
@@ -117,15 +116,13 @@ if uploaded_file is not None:
                     d[key] = val
                     break
 
-# --- HİBRİT KLİNİK DOĞRULAMA FORMU (MANUAL OVERRIDE) ---
-# Resim yüklensin veya yüklenmesin, hekimin her zaman değerleri girip motoru çalıştırma hakkı vardır.
+# --- HİBRİT KLİNİK DOĞRULAMA FORMU ---
 st.divider()
 st.subheader("🔍 Klinik Doğrulama ve Teşhis")
-st.write("Makinenin okuyabildiği değerler aşağıya otomatik dolduruldu. Eksik veya hatalı olanları düzeltip motoru çalıştırın.")
+st.write("Makinenin okuyabildiği değerler aşağıya dolduruldu. Eksik olanları tamamlayıp motoru çalıştırın.")
 
 with st.form("klinik_dogrulama_formu"):
     c1, c2, c3, c4 = st.columns(4)
-    # OCR pH'ı saçma sapan bir şey okursa (örn. 1913) güvenli varsayılana dön
     safe_ph = d['ph'] if d['ph'] and 6.8 < d['ph'] < 7.8 else 7.40
     ph = c1.number_input("pH", value=float(safe_ph), format="%.3f", step=0.01)
     pco2 = c2.number_input("pCO2", value=float(d['pco2'] if d['pco2'] else 40.0), step=1.0)
@@ -138,29 +135,72 @@ with st.form("klinik_dogrulama_formu"):
     lac = c7.number_input("Laktat", value=float(d['lactate'] if d['lactate'] else 1.0), step=0.1)
     po4 = c8.number_input("Fosfat", value=float(d['po4'] if d['po4'] else 3.0), step=0.1)
     
+    # Cihazdan okunan cBE (varsa) formun altında opsiyonel teyit olarak kalsın
+    cbe_ocr = st.number_input("Cihazdan Okunan cBase(Ecf) - Opsiyonel", value=float(d['cbe'] if d['cbe'] else 0.0), step=0.1)
+    
     submit_btn = st.form_submit_button("🩺 Gobseck Tanı Motorunu Çalıştır", type="primary", use_container_width=True)
 
 # --- MOTORUN ÇALIŞMASI VE SONUÇLAR ---
 if submit_btn:
-    with st.spinner("Fizyolojik Denge Analiz Ediliyor..."):
-        # İLERİ DÜZEY HESAPLAMALAR
+    with st.spinner("Stewart ve Fizyolojik Denge Analiz Ediliyor..."):
+        
+        # 1. TEMEL HESAPLAMALAR
         aa_grad = (((fio2_pct/100) * 713) - (1.2 * pco2)) - po2
-        cbe = (na - cl - 38) + (1 - lac) + (4 - alb) * 2.5 + (3 - po4) * 0.6
         ag_corr = (na - (cl + hco3)) + (2.5 * (4.0 - alb))
+        
+        # 2. STEWART HESAPLAMALARI (SLAYTLARDAKİ FORMÜLASYON)
+        # Formül 1: Hesaplanan cBase(Ecf)
+        cbe_hesaplanan = hco3 - 24.8 + (16.2 * (ph - 7.4))
+        
+        # Formül 2: ΔSID Bileşenlerinin İzolasyonu
+        dsid_nacl = (na - cl) - 38
+        dsid_lac = 1 - lac
+        dsid_po4 = 2 - (po4 * 0.6)
+        dsid_alb = (4 - alb) * 2.5
+        
+        # Toplam cBE_st
+        dsid_total = dsid_nacl + dsid_lac + dsid_po4 + dsid_alb
 
         diagnostic_report = analyze_acid_base(ph, pco2, hco3)
 
-        # SONUÇ EKRANI
+        # --- SONUÇ EKRANI ---
         st.success("✅ Teşhis Raporu Hazır")
         
+        # Klasik Teşhis
         st.subheader("📋 Klinik Karar Defteri")
         for line in diagnostic_report:
             st.info(line)
         
         st.divider()
         
-        st.subheader("🧪 Stewart & İleri Fizyoloji")
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Stewart cBE (Ecf)", f"{cbe:.2f} mmol/L")
-        m2.metric("A-a Gradient", f"{aa_grad:.1f} mmHg", delta=f"Beklenen: <{(age+10)/4:.1f}", delta_color="off")
-        m3.metric("Düzeltilmiş Anyon Açığı", f"{ag_corr:.1f} mmol/L")
+        # STEWART (ΔSID) DETAYLI ANALİZİ
+        st.subheader("🔬 Stewart (ΔSID) Detaylı Analizi")
+        
+        # Göstergeler
+        col_cbe1, col_cbe2 = st.columns(2)
+        col_cbe1.metric("Hesaplanan cBase(Ecf)", f"{cbe_hesaplanan:.2f} mmol/L")
+        if cbe_ocr != 0.0:
+            col_cbe2.metric("Cihazdan Okunan cBE", f"{cbe_ocr:.2f} mmol/L")
+            
+        st.markdown(f"""
+        * **ΔSID (Na-Cl):** `{dsid_nacl:+.2f} mmol/L` — *{'Alkalozis' if dsid_nacl > 0 else 'Asidozis' if dsid_nacl < 0 else 'Normal'}*
+        * **ΔSID (Laktat):** `{dsid_lac:+.2f} mmol/L` — *{'Laktik Asidoz' if dsid_lac < 0 else 'Normal'}*
+        * **ΔSID (Fosfat):** `{dsid_po4:+.2f} mmol/L` — *{'Hiperfosfatemik Asidoz' if dsid_po4 < 0 else 'Normal'}*
+        * **ΔSID (Albümin):** `{dsid_alb:+.2f} mmol/L` — *{'Hipoalbüminemik Alkaloz' if dsid_alb > 0 else 'Normal'}*
+        """)
+        
+        st.info(f"**Toplam cBE_st (ΔSID_total):** {dsid_total:+.2f} mmol/L")
+
+        # Sağlama ve Teyit Algoritması
+        fark = abs(cbe_hesaplanan - dsid_total)
+        if fark <= 2.5:
+            st.success(f"**Sağlama Başarılı:** Hesaplanan cBE ({cbe_hesaplanan:.2f}) ile Toplam ΔSID ({dsid_total:.2f}) formülleri birbiriyle uyumlu.")
+        else:
+            st.warning(f"**Güçlü Katkı Uyarısı:** cBE ve Toplam ΔSID arasında {fark:.2f} mmol/L açıklanamayan fark (SIG) var. Ölçülmeyen diğer anyonları (Keton, Toksin, Üremi) değerlendirin.")
+
+        st.divider()
+        
+        # Ek Parametreler
+        m1, m2 = st.columns(2)
+        m1.metric("A-a Gradient", f"{aa_grad:.1f} mmHg", delta=f"Beklenen: <{(age+10)/4:.1f}", delta_color="off")
+        m2.metric("Düzeltilmiş Anyon Açığı", f"{ag_corr:.1f} mmol/L")
