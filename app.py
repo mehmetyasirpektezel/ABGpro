@@ -79,10 +79,11 @@ def analyze_acid_base(ph, pco2, hco3):
 
     return report
 
-# --- YAN MENÜ: KLİNİK BAĞLAM ---
+# --- YAN MENÜ: KLİNİK BAĞLAM VE TERMOREGÜLASYON ---
 with st.sidebar:
     st.header("Hasta Verileri")
     age = st.number_input("Yaş", value=60)
+    temp = st.number_input("Vücut Sıcaklığı (°C)", value=37.0, step=0.1)
     fio2_pct = st.number_input("FiO2 (%)", value=21)
     alb = st.number_input("Albumin (g/dL)", value=4.0, step=0.1)
 
@@ -119,7 +120,7 @@ if uploaded_file is not None:
 # --- HİBRİT KLİNİK DOĞRULAMA FORMU ---
 st.divider()
 st.subheader("🔍 Klinik Doğrulama ve Teşhis")
-st.write("Makinenin okuyabildiği değerler aşağıya dolduruldu. Eksik olanları tamamlayıp motoru çalıştırın.")
+st.write("Makinenin okuyabildiği değerler (cihazın 37°C standart ölçümleri) aşağıya dolduruldu. Eksik olanları tamamlayıp motoru çalıştırın.")
 
 with st.form("klinik_dogrulama_formu"):
     c1, c2, c3, c4 = st.columns(4)
@@ -135,7 +136,6 @@ with st.form("klinik_dogrulama_formu"):
     lac = c7.number_input("Laktat", value=float(d['lactate'] if d['lactate'] else 1.0), step=0.1)
     po4 = c8.number_input("Fosfat", value=float(d['po4'] if d['po4'] else 3.0), step=0.1)
     
-    # Cihazdan okunan cBE (varsa) formun altında opsiyonel teyit olarak kalsın
     cbe_ocr = st.number_input("Cihazdan Okunan cBase(Ecf) - Opsiyonel", value=float(d['cbe'] if d['cbe'] else 0.0), step=0.1)
     
     submit_btn = st.form_submit_button("🩺 Gobseck Tanı Motorunu Çalıştır", type="primary", use_container_width=True)
@@ -148,35 +148,44 @@ if submit_btn:
         aa_grad = (((fio2_pct/100) * 713) - (1.2 * pco2)) - po2
         ag_corr = (na - (cl + hco3)) + (2.5 * (4.0 - alb))
         
-        # 2. STEWART HESAPLAMALARI (SLAYTLARDAKİ FORMÜLASYON)
-        # Formül 1: Hesaplanan cBase(Ecf)
+        # 2. STEWART HESAPLAMALARI
         cbe_hesaplanan = hco3 - 24.8 + (16.2 * (ph - 7.4))
         
-        # Formül 2: ΔSID Bileşenlerinin İzolasyonu
         dsid_nacl = (na - cl) - 38
         dsid_lac = 1 - lac
         dsid_po4 = 2 - (po4 * 0.6)
         dsid_alb = (4 - alb) * 2.5
-        
-        # Toplam cBE_st
         dsid_total = dsid_nacl + dsid_lac + dsid_po4 + dsid_alb
 
+        # 3. KLİNİK TEŞHİS RAPORU
         diagnostic_report = analyze_acid_base(ph, pco2, hco3)
 
         # --- SONUÇ EKRANI ---
         st.success("✅ Teşhis Raporu Hazır")
         
-        # Klasik Teşhis
         st.subheader("📋 Klinik Karar Defteri")
         for line in diagnostic_report:
             st.info(line)
+            
+        # --- TERMOREGÜLASYON PANeli (SADECE 37°C DIŞINDA GÖRÜNÜR) ---
+        if temp != 37.0:
+            # Sıcaklık Düzeltme Formülleri
+            ph_t = ph - (0.0146 + 0.065 * (ph - 7.40)) * (temp - 37.0)
+            pco2_t = pco2 * (10 ** (0.021 * (temp - 37.0)))
+            
+            st.divider()
+            st.subheader("🌡️ Termoregülasyon (pH-Stat Düzeltmesi)")
+            st.warning(f"Kan gazı cihazı analizleri standart 37°C'de yapar. Hastanın gerçek vücut sıcaklığına ({temp}°C) göre in vivo değerler:")
+            
+            t1, t2 = st.columns(2)
+            t1.metric(f"Düzeltilmiş pH ({temp}°C)", f"{ph_t:.3f}", delta=f"{ph_t - ph:.3f}", delta_color="inverse")
+            t2.metric(f"Düzeltilmiş pCO2 ({temp}°C)", f"{pco2_t:.1f} mmHg", delta=f"{pco2_t - pco2:.1f} mmHg", delta_color="inverse")
         
         st.divider()
         
         # STEWART (ΔSID) DETAYLI ANALİZİ
         st.subheader("🔬 Stewart (ΔSID) Detaylı Analizi")
         
-        # Göstergeler
         col_cbe1, col_cbe2 = st.columns(2)
         col_cbe1.metric("Hesaplanan cBase(Ecf)", f"{cbe_hesaplanan:.2f} mmol/L")
         if cbe_ocr != 0.0:
@@ -191,16 +200,14 @@ if submit_btn:
         
         st.info(f"**Toplam cBE_st (ΔSID_total):** {dsid_total:+.2f} mmol/L")
 
-        # Sağlama ve Teyit Algoritması
         fark = abs(cbe_hesaplanan - dsid_total)
         if fark <= 2.5:
             st.success(f"**Sağlama Başarılı:** Hesaplanan cBE ({cbe_hesaplanan:.2f}) ile Toplam ΔSID ({dsid_total:.2f}) formülleri birbiriyle uyumlu.")
         else:
-            st.warning(f"**Güçlü Katkı Uyarısı:** cBE ve Toplam ΔSID arasında {fark:.2f} mmol/L açıklanamayan fark (SIG) var. Ölçülmeyen diğer anyonları (Keton, Toksin, Üremi) değerlendirin.")
+            st.error(f"**Güçlü Katkı Uyarısı:** cBE ve Toplam ΔSID arasında {fark:.2f} mmol/L açıklanamayan fark (SIG) var. Ölçülmeyen diğer anyonları (Keton, Toksin, Üremi) değerlendirin.")
 
         st.divider()
         
-        # Ek Parametreler
         m1, m2 = st.columns(2)
         m1.metric("A-a Gradient", f"{aa_grad:.1f} mmHg", delta=f"Beklenen: <{(age+10)/4:.1f}", delta_color="off")
         m2.metric("Düzeltilmiş Anyon Açığı", f"{ag_corr:.1f} mmol/L")
