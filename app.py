@@ -34,8 +34,8 @@ def clean_clinical_image(image):
     scaled = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_LANCZOS4)
     return cv2.GaussianBlur(scaled, (3, 3), 0)
 
-# --- KLİNİK TANI MOTORU (WINTERS, BLEICH, KOMPANZASYON) ---
-def analyze_acid_base(ph, pco2, hco3):
+# --- KLİNİK TANI MOTORU (METABOLİK VE SOLUNUMSAL YOLAK) ---
+def analyze_acid_base(ph, pco2, hco3, na, cl, alb):
     report = []
     
     # 1. Bleich Kuralı
@@ -47,35 +47,64 @@ def analyze_acid_base(ph, pco2, hco3):
     else:
         report.append("✅ **Bleich Kuralı Geçerli:** Veriler kendi içinde fizyolojik olarak tutarlı.")
 
-    # 2. Birincil Bozukluk ve Kompanzasyon Analizi
-    if ph < 7.36:
-        if hco3 < 22:
-            report.append("🩸 **Birincil Bozukluk:** Metabolik Asidoz")
+    # 2. METABOLİK YOLAK (Anyon Açığı ve Delta Gap)
+    ag_corr = (na - (cl + hco3)) + (2.5 * (4.0 - alb))
+    has_hagma = False
+
+    if ag_corr > 12:
+        has_hagma = True
+        report.append(f"🩸 **Metabolik Yolak:** Albümin düzeltilmiş Anyon Açığı yüksek ({ag_corr:.1f} > 12). **Yüksek Anyon Açıklı Metabolik Asidoz (HAGMA)** mevcut.")
+        
+        # Bikarbonat Açığı (ΔAG - ΔHCO3) Analizi
+        delta_ag = ag_corr - 12
+        delta_hco3 = 24 - hco3
+        delta_gap = delta_ag - delta_hco3
+        
+        report.append(f"🔬 **Bikarbonat Açığı (ΔAG - ΔHCO3):** {delta_gap:.1f}")
+        if delta_gap > 6:
+            report.append("🔍 **Miks Bozukluk:** Bikarbonat açığı > 6. Eşzamanlı **Metabolik Alkaloz** tespit edildi.")
+        elif delta_gap < -6:
+            report.append("🔍 **Miks Bozukluk:** Bikarbonat açığı < -6. Eşzamanlı **Normal Anyon Açıklı (Hiperkloremik) Metabolik Asidoz** tespit edildi.")
+
+    # 3. SOLUNUMSAL YOLAK VE BİRİNCİL BOZUKLUK
+    # pH 7.36-7.44 arasında olsa bile pCO2 ve HCO3 kaymışsa süreci tetikleriz (Peltezel Yaklaşımı)
+    if ph < 7.36 or (7.36 <= ph < 7.40 and (pco2 > 44 or hco3 < 22)):
+        if pco2 > 42 and hco3 >= 22:
+            report.append("🫁 **Birincil Sürücü:** Solunumsal Asidoz")
+            exp_hco3_acute = 24 + 0.1 * (pco2 - 40)
+            exp_hco3_chronic = 24 + 0.4 * (pco2 - 40)
+            report.append(f"🔄 **Kompanzasyon (Beklenen HCO3):** Akut {exp_hco3_acute:.1f} mmol/L | Kronik {exp_hco3_chronic:.1f} mmol/L")
+        elif hco3 < 22:
+            if not has_hagma:
+                report.append("🩸 **Birincil Sürücü:** Normal Anyon Açıklı Metabolik Asidoz")
             exp_pco2 = (1.5 * hco3) + 8
+            report.append(f"❄️ **Winter Formülü:** Beklenen pCO2: {exp_pco2:.1f} ± 2")
             if pco2 < (exp_pco2 - 2):
-                report.append(f"🔍 **Miks Bozukluk:** Eşzamanlı Solunumsal Alkaloz (Beklenen pCO2: {exp_pco2:.1f} ±2)")
+                report.append("🔍 **Miks Bozukluk:** Beklenenden düşük pCO2. Eşzamanlı **Solunumsal Alkaloz**.")
             elif pco2 > (exp_pco2 + 2):
-                report.append(f"🔍 **Miks Bozukluk:** Eşzamanlı Solunumsal Asidoz (Beklenen pCO2: {exp_pco2:.1f} ±2)")
-            else:
-                report.append("✅ Solunumsal kompanzasyon yeterli (Winter Formülü ile uyumlu).")
-        elif pco2 > 44:
-            report.append("🫁 **Birincil Bozukluk:** Solunumsal Asidoz")
-            report.append(f"Beklenen HCO3 (Akut): {24 + ((pco2 - 40) / 10):.1f} | (Kronik): {24 + 4 * ((pco2 - 40) / 10):.1f}")
-    elif ph > 7.44:
-        if hco3 > 26:
-            report.append("🩸 **Birincil Bozukluk:** Metabolik Alkaloz")
-            exp_pco2 = (0.7 * hco3) + 21
-            if pco2 > (exp_pco2 + 2):
-                report.append(f"🔍 **Miks Bozukluk:** Eşzamanlı Solunumsal Asidoz (Beklenen pCO2: {exp_pco2:.1f} ±2)")
-            elif pco2 < (exp_pco2 - 2):
-                report.append(f"🔍 **Miks Bozukluk:** Eşzamanlı Solunumsal Alkaloz (Beklenen pCO2: {exp_pco2:.1f} ±2)")
+                report.append("🔍 **Miks Bozukluk:** Beklenenden yüksek pCO2. Eşzamanlı **Solunumsal Asidoz**.")
             else:
                 report.append("✅ Solunumsal kompanzasyon yeterli.")
-        elif pco2 < 36:
-            report.append("🫁 **Birincil Bozukluk:** Solunumsal Alkaloz")
-            report.append(f"Beklenen HCO3 (Akut): {24 - 2 * ((40 - pco2) / 10):.1f} | (Kronik): {24 - 5 * ((40 - pco2) / 10):.1f}")
-    else:
-        report.append("pH Normal aralıkta. Gizli metabolik bozukluklar için Anyon Açığı ve Stewart cBE değerlerini kontrol edin.")
+
+    elif ph > 7.44 or (7.40 <= ph <= 7.44 and (pco2 < 36 or hco3 > 26)):
+        if pco2 < 38 and hco3 <= 26:
+            report.append("🫁 **Birincil Sürücü:** Solunumsal Alkaloz")
+            exp_hco3_acute = 24 - 0.2 * (40 - pco2)
+            exp_hco3_chronic = 24 - 0.5 * (40 - pco2)
+            report.append(f"🔄 **Kompanzasyon (Beklenen HCO3):** Akut {exp_hco3_acute:.1f} mmol/L | Kronik {exp_hco3_chronic:.1f} mmol/L")
+        elif hco3 > 26:
+            report.append("🩸 **Birincil Sürücü:** Metabolik Alkaloz")
+            exp_pco2 = (0.7 * hco3) + 21
+            report.append(f"🔄 **Kompanzasyon (Beklenen pCO2):** {exp_pco2:.1f} ± 2")
+            if pco2 > (exp_pco2 + 2):
+                report.append("🔍 **Miks Bozukluk:** Eşzamanlı **Solunumsal Asidoz**.")
+            elif pco2 < (exp_pco2 - 2):
+                report.append("🔍 **Miks Bozukluk:** Eşzamanlı **Solunumsal Alkaloz**.")
+            else:
+                report.append("✅ Solunumsal kompanzasyon yeterli.")
+
+    elif 7.36 <= ph <= 7.44 and not has_hagma:
+        report.append("✅ pH ve Anyon Açığı normal aralıkta. Belirgin bir asit-baz bozukluğu saptanmadı.")
 
     return report
 
@@ -157,8 +186,8 @@ if submit_btn:
         dsid_alb = (4 - alb) * 2.5
         dsid_total = dsid_nacl + dsid_lac + dsid_po4 + dsid_alb
 
-        # 3. KLİNİK TEŞHİS RAPORU
-        diagnostic_report = analyze_acid_base(ph, pco2, hco3)
+        # 3. KLİNİK TEŞHİS RAPORU (Düzeltilmiş Yolaklarla)
+        diagnostic_report = analyze_acid_base(ph, pco2, hco3, na, cl, alb)
 
         # --- SONUÇ EKRANI ---
         st.success("✅ Teşhis Raporu Hazır")
@@ -167,9 +196,8 @@ if submit_btn:
         for line in diagnostic_report:
             st.info(line)
             
-        # --- TERMOREGÜLASYON PANeli (SADECE 37°C DIŞINDA GÖRÜNÜR) ---
+        # --- TERMOREGÜLASYON PANeli ---
         if temp != 37.0:
-            # Sıcaklık Düzeltme Formülleri
             ph_t = ph - (0.0146 + 0.065 * (ph - 7.40)) * (temp - 37.0)
             pco2_t = pco2 * (10 ** (0.021 * (temp - 37.0)))
             
