@@ -6,14 +6,16 @@ from PIL import Image, ImageOps
 import re
 import shutil
 
-# --- CLOUD CONFIG ---
+# --- BULUT & TESSERACT AYARLARI ---
 pytesseract.pytesseract.tesseract_cmd = shutil.which("tesseract") or "/usr/bin/tesseract"
 
+# --- ARAYÜZ KURULUMU ---
 st.set_page_config(page_title="Gobseck ABG Pro", page_icon="🩸")
 
 st.title("🩸 Gobseck ABG Engine")
-st.caption("Docent Dr. Pektezel's Professional Clinical Tool")
+st.caption("Doç. Dr. Pektezel'in Profesyonel Klinik Tanı Aracı")
 
+# --- OCR ARAMA ŞABLONLARI ---
 patterns = {
     'ph': [r'pH', r'p\.H', r'PH'],
     'pco2': [r'pCO2', r'PCO2', r'pCOz', r'pCO', r'PCO', r'pC02', r'pC0', r'pCO;'],
@@ -25,101 +27,103 @@ patterns = {
     'po4': [r'PO4', r'Phosphate', r'Fosfat']
 }
 
+# --- GÖRÜNTÜ İŞLEME (EKRAN & TERMAL İÇİN OPTİMİZE) ---
 def clean_clinical_image(image):
-    """The 'Naked' LSTM approach. Let Tesseract's neural net handle the screen grid."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    
-    # 1. Upscale using high-quality Lanczos interpolation (keeps text sharp)
+    # Çözünürlüğü artırarak OCR'ın ince fontları okumasını sağla
     scaled = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_LANCZOS4)
-    
-    # 2. A very slight blur to soften the monitor's pixel grid
+    # Ekran piksellerini (Moiré) ve termal nokta boşluklarını hafifçe erit
     blur = cv2.GaussianBlur(scaled, (3, 3), 0)
-    
-    # 3. Notice we return the grayscale directly. No thresholding/binarization!
     return blur
 
+# --- GOBSECK KLİNİK TANI MOTORU (WINTERS, BLEICH, KOMPANZASYON) ---
 def analyze_acid_base(ph, pco2, hco3):
-    """The Gobseck Diagnostic Core: Evaluates primary disorders and compensations."""
     report = []
     
-    # Bleich Rule
+    # 1. Bleich Kuralı (Veri Tutarlılığı)
     expected_h = 24 * (pco2 / hco3) if hco3 else 0
     expected_ph = 9.0 - np.log10(expected_h) if expected_h > 0 else 7.4
     
     if abs(ph - expected_ph) > 0.05:
-        report.append("⚠️ **Bleich Rule Failed:** Suspect venous sample or lab error.")
+        report.append("⚠️ **Bleich Kuralı İhlali:** Değerler tutarsız. Venöz kan veya laboratuvar hatası şüphesi.")
     else:
-        report.append("✅ **Bleich Rule Passed:** Data is internally consistent.")
+        report.append("✅ **Bleich Kuralı Geçerli:** Veriler kendi içinde fizyolojik olarak tutarlı.")
 
-    # Primary & Compensation Logic
+    # 2. Birincil Bozukluk ve Kompanzasyon Analizi
     if ph < 7.36:
         if hco3 < 22:
-            report.append("🩸 **Primary:** Metabolic Acidosis")
+            report.append("🩸 **Birincil Bozukluk:** Metabolik Asidoz")
+            # Winter Formülü
             exp_pco2 = (1.5 * hco3) + 8
             if pco2 < (exp_pco2 - 2):
-                report.append(f"🔍 **Mixed:** Concomitant Respiratory Alkalosis (Exp. pCO2: {exp_pco2:.1f} ±2)")
+                report.append(f"🔍 **Miks Bozukluk:** Eşzamanlı Solunumsal Alkaloz (Beklenen pCO2: {exp_pco2:.1f} ±2)")
             elif pco2 > (exp_pco2 + 2):
-                report.append(f"🔍 **Mixed:** Concomitant Respiratory Acidosis (Exp. pCO2: {exp_pco2:.1f} ±2)")
+                report.append(f"🔍 **Miks Bozukluk:** Eşzamanlı Solunumsal Asidoz (Beklenen pCO2: {exp_pco2:.1f} ±2)")
             else:
-                report.append("Adequate respiratory compensation.")
+                report.append("✅ Solunumsal kompanzasyon yeterli (Winter Formülü ile uyumlu).")
         elif pco2 > 44:
-            report.append("🫁 **Primary:** Respiratory Acidosis")
-            report.append(f"Expected HCO3 (Acute): {24 + ((pco2 - 40) / 10):.1f} | (Chronic): {24 + 4 * ((pco2 - 40) / 10):.1f}")
+            report.append("🫁 **Birincil Bozukluk:** Solunumsal Asidoz")
+            report.append(f"Beklenen HCO3 (Akut): {24 + ((pco2 - 40) / 10):.1f} | (Kronik): {24 + 4 * ((pco2 - 40) / 10):.1f}")
     elif ph > 7.44:
         if hco3 > 26:
-            report.append("🩸 **Primary:** Metabolic Alkalosis")
+            report.append("🩸 **Birincil Bozukluk:** Metabolik Alkaloz")
             exp_pco2 = (0.7 * hco3) + 21
             if pco2 > (exp_pco2 + 2):
-                report.append(f"🔍 **Mixed:** Concomitant Respiratory Acidosis (Exp. pCO2: {exp_pco2:.1f} ±2)")
+                report.append(f"🔍 **Miks Bozukluk:** Eşzamanlı Solunumsal Asidoz (Beklenen pCO2: {exp_pco2:.1f} ±2)")
             elif pco2 < (exp_pco2 - 2):
-                report.append(f"🔍 **Mixed:** Concomitant Respiratory Alkalosis (Exp. pCO2: {exp_pco2:.1f} ±2)")
+                report.append(f"🔍 **Miks Bozukluk:** Eşzamanlı Solunumsal Alkaloz (Beklenen pCO2: {exp_pco2:.1f} ±2)")
             else:
-                report.append("Adequate respiratory compensation.")
+                report.append("✅ Solunumsal kompanzasyon yeterli.")
         elif pco2 < 36:
-            report.append("🫁 **Primary:** Respiratory Alkalosis")
-            report.append(f"Expected HCO3 (Acute): {24 - 2 * ((40 - pco2) / 10):.1f} | (Chronic): {24 - 5 * ((40 - pco2) / 10):.1f}")
+            report.append("🫁 **Birincil Bozukluk:** Solunumsal Alkaloz")
+            report.append(f"Beklenen HCO3 (Akut): {24 - 2 * ((40 - pco2) / 10):.1f} | (Kronik): {24 - 5 * ((40 - pco2) / 10):.1f}")
     else:
-        report.append("Normal pH. Check Anion Gap and Stewart cBE for occult metabolic disorders.")
+        report.append("pH Normal aralıkta. Gizli metabolik bozukluklar için Anyon Açığı ve Stewart cBE değerlerini kontrol edin.")
 
     return report
 
-# --- SIDEBAR ---
+# --- YAN MENÜ: KLİNİK BAĞLAM ---
 with st.sidebar:
-    st.header("Patient Context")
-    age = st.number_input("Age", value=60)
+    st.header("Hasta Verileri")
+    age = st.number_input("Yaş", value=60)
     fio2_pct = st.number_input("FiO2 (%)", value=21)
     alb = st.number_input("Albumin (g/dL)", value=4.0)
 
-# --- NATIVE CAPTURE ---
-st.info("Tap 'Browse files' -> 'Camera'. Keep the phone steady.")
-uploaded_file = st.file_uploader("Upload or Take Photo of ABG", type=['jpg', 'jpeg', 'png'])
+# --- MOBİL KAMERA & DOSYA YÜKLEME ---
+st.info("Kamerayı açmak için 'Browse files' -> 'Kamera' seçeneğine dokunun. Mümkünse sadece pH, pCO2 ve HCO3 içeren bölüme odaklanın.")
+uploaded_file = st.file_uploader("ABG Fişini Yükle veya Fotoğrafını Çek", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file is not None:
-    with st.spinner("Decoding Screen Capture..."):
+    with st.spinner("Klinik Değerler Çözümleniyor..."):
+        # Resmi yükle ve mobil rotasyon hatalarını düzelt
         img = Image.open(uploaded_file)
         img = ImageOps.exif_transpose(img) 
         
         frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
         processed = clean_clinical_image(frame)
         
-        # PSM 4 is highly resilient to columns and spacing
+        # OCR İşlemi
         text = pytesseract.image_to_string(processed, config='--oem 3 --psm 4')
         
+        # Değerleri Ayıklama
         d = {k: None for k in patterns.keys()}
         for key, regs in patterns.items():
             for r in regs:
-                m = re.search(r + r'[\s:=,\|\~_*\-]*([-+]?\d+[\.,]\d+|\d+)', text, re.IGNORECASE)
+                # GÜNCELLEME: Nokta, virgül ve OCR kirliliğini tolere eden sağlam Regex
+                m = re.search(r + r'[\s:=,\|\~_*\-\.]*([-+]?\d+[\.,]\d+|\d+)', text, re.IGNORECASE)
                 if m: 
-                    d[key] = float(m.group(1).replace(',', '.'))
+                    clean_number = m.group(1).replace(',', '.')
+                    d[key] = float(clean_number)
                     break
 
-        # --- MATH GATEKEEPER ---
+        # --- GÜVENLİK KAPISI: TEMEL DEĞER KONTROLÜ ---
         if d['ph'] is None or d['pco2'] is None:
-            st.error("❌ OCR missed primary values (pH or pCO2).")
-            with st.expander("Machine Vision Debugger"):
-                st.image(processed, caption="Naked Grayscale View")
-                st.text("Raw Text Found by OCR:\n" + text)
+            st.error("❌ OCR temel değerleri (pH veya pCO2) bulamadı. Lütfen daha net veya daha yakından bir fotoğraf çekin.")
+            with st.expander("Geliştirici Paneli - Makine Ne Gördü?"):
+                st.image(processed, caption="İşlenmiş Görüntü")
+                st.text("Makinenin Okuduğu Ham Metin:\n" + text)
         else:
+            # Okunan değerleri ata, okunamayan ikincil değerler için fizyolojik varsayılanlar (çökmeyi önlemek için)
             ph = d['ph']
             pco2 = d['pco2']
             hco3 = d['hco3'] if d['hco3'] is not None else 24.0
@@ -129,28 +133,32 @@ if uploaded_file is not None:
             po2 = d['po2'] if d['po2'] is not None else 90.0
             po4 = d['po4'] if d['po4'] is not None else 3.0
             
-            # Math
+            # --- İLERİ DÜZEY HESAPLAMALAR ---
             aa_grad = (((fio2_pct/100) * 713) - (1.2 * pco2)) - po2
             cbe = (na - cl - 38) + (1 - lac) + (4 - alb) * 2.5 + (3 - po4) * 0.6
             ag_corr = (na - (cl + hco3)) + (2.5 * (4.0 - alb))
 
-            # The Gobseck Audit
+            # Klinik Tanı Motorunu Çalıştır
             diagnostic_report = analyze_acid_base(ph, pco2, hco3)
 
-            # UI Dashboard
-            st.success("✅ Analysis Complete")
+            # --- SONUÇ EKRANI ---
+            st.success("✅ Analiz ve Teşhis Tamamlandı")
             col1, col2, col3 = st.columns(3)
             col1.metric("pH", ph)
             col2.metric("pCO2", pco2)
             col3.metric("HCO3", hco3)
             
             st.divider()
-            st.subheader("📋 Diagnostic Ledger")
+            
+            # Klinik Karar Defteri
+            st.subheader("📋 Klinik Teşhis Raporu")
             for line in diagnostic_report:
                 st.write(line)
             
             st.divider()
-            st.subheader("🧪 Stewart & Gradients")
-            st.write(f"**Stewart cBE:** {cbe:.2f} mmol/L")
-            st.write(f"**A-a Gradient:** {aa_grad:.1f} mmHg (Exp: <{(age+10)/4:.1f})")
-            st.write(f"**Anion Gap (Corr):** {ag_corr:.1f} mmol/L")
+            
+            # Stewart ve Gradientler
+            st.subheader("🧪 Stewart & İleri Fizyoloji")
+            st.write(f"**Stewart cBE (Ecf):** {cbe:.2f} mmol/L")
+            st.write(f"**A-a Gradient:** {aa_grad:.1f} mmHg (Beklenen: <{(age+10)/4:.1f})")
+            st.write(f"**Albümin Düzeltilmiş Anyon Açığı:** {ag_corr:.1f} mmol/L")
