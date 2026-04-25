@@ -10,12 +10,12 @@ import shutil
 pytesseract.pytesseract.tesseract_cmd = shutil.which("tesseract") or "/usr/bin/tesseract"
 
 # --- ARAYÜZ KURULUMU ---
-st.set_page_config(page_title="Gobseck ABG Pro", page_icon="🩸")
+st.set_page_config(page_title="Gobseck ABG Pro", page_icon="🩸", layout="centered")
 
 st.title("🩸 Gobseck ABG Engine")
 st.caption("Doç. Dr. Pektezel'in Profesyonel Klinik Tanı Aracı")
 
-# --- OCR ARAMA ŞABLONLARI (HALÜSİNASYONLAR EKLENDİ) ---
+# --- OCR ARAMA ŞABLONLARI ---
 patterns = {
     'ph': [r'pH', r'p\.H', r'PH', r'DH'],
     'pco2': [r'pCO2', r'PCO2', r'pCOz', r'pCO', r'PCO', r'pC02', r'pC0', r'pCO;', r'HCQ'],
@@ -27,18 +27,17 @@ patterns = {
     'po4': [r'PO4', r'Phosphate', r'Fosfat']
 }
 
-# --- GÖRÜNTÜ İŞLEME (EKRAN İÇİN OPTİMİZE) ---
+# --- GÖRÜNTÜ İŞLEME ---
 def clean_clinical_image(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     scaled = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_LANCZOS4)
-    blur = cv2.GaussianBlur(scaled, (3, 3), 0)
-    return blur
+    return cv2.GaussianBlur(scaled, (3, 3), 0)
 
 # --- GOBSECK KLİNİK TANI MOTORU (WINTERS, BLEICH, KOMPANZASYON) ---
 def analyze_acid_base(ph, pco2, hco3):
     report = []
     
-    # 1. Bleich Kuralı (Veri Tutarlılığı)
+    # 1. Bleich Kuralı
     expected_h = 24 * (pco2 / hco3) if hco3 else 0
     expected_ph = 9.0 - np.log10(expected_h) if expected_h > 0 else 7.4
     
@@ -87,11 +86,14 @@ with st.sidebar:
     alb = st.number_input("Albumin (g/dL)", value=4.0)
 
 # --- MOBİL KAMERA & DOSYA YÜKLEME ---
-st.info("Kamerayı açmak için 'Browse files' -> 'Kamera' seçeneğine dokunun. Mümkünse sadece pH, pCO2 ve HCO3 içeren bölüme odaklanın.")
+st.info("Kamerayı açmak için 'Browse files' -> 'Kamera' seçeneğine dokunun.")
 uploaded_file = st.file_uploader("ABG Fişini Yükle veya Fotoğrafını Çek", type=['jpg', 'jpeg', 'png'])
 
+# Sözlük başlangıcı (Hata vermemesi için globalde tanımlıyoruz)
+d = {k: None for k in patterns.keys()}
+
 if uploaded_file is not None:
-    with st.spinner("Klinik Değerler Çözümleniyor..."):
+    with st.spinner("Optik Asistan Değerleri Okuyor..."):
         img = Image.open(uploaded_file)
         img = ImageOps.exif_transpose(img) 
         
@@ -100,8 +102,6 @@ if uploaded_file is not None:
         
         text = pytesseract.image_to_string(processed, config='--oem 3 --psm 4')
         
-        # Değerleri Ayıklama
-        d = {k: None for k in patterns.keys()}
         for key, regs in patterns.items():
             for r in regs:
                 m = re.search(r + r'[\s:=,\|\~_*\-\.]*([-+]?\d+[\.,]\d+|\d+)', text, re.IGNORECASE)
@@ -109,53 +109,58 @@ if uploaded_file is not None:
                     clean_number = m.group(1).replace(',', '.')
                     val = float(clean_number)
                     
-                    # KLİNİK GÜVENLİK: Eksik ondalık noktaları otomatik düzelt (Örn: pH 745 okunduysa 7.45 yap)
+                    # pH için otomatik ondalık düzeltici
                     if key == 'ph':
                         if val > 600 and val < 800: val = val / 100
                         elif val > 6000 and val < 8000: val = val / 1000
-                        
+                    
                     d[key] = val
                     break
 
-        # --- GÜVENLİK KAPISI ---
-        if d['ph'] is None or d['pco2'] is None:
-            st.error("❌ OCR temel değerleri (pH veya pCO2) bulamadı. Lütfen daha net bir fotoğraf çekin.")
-            with st.expander("Geliştirici Paneli - Makine Ne Gördü?"):
-                st.image(processed, caption="İşlenmiş Görüntü")
-                st.text("Makinenin Okuduğu Ham Metin:\n" + text)
-        else:
-            ph = d['ph']
-            pco2 = d['pco2']
-            hco3 = d['hco3'] if d['hco3'] is not None else 24.0
-            na = d['na'] if d['na'] is not None else 140.0
-            cl = d['cl'] if d['cl'] is not None else 104.0
-            lac = d['lactate'] if d['lactate'] is not None else 1.0
-            po2 = d['po2'] if d['po2'] is not None else 90.0
-            po4 = d['po4'] if d['po4'] is not None else 3.0
-            
-            # İLERİ DÜZEY HESAPLAMALAR
-            aa_grad = (((fio2_pct/100) * 713) - (1.2 * pco2)) - po2
-            cbe = (na - cl - 38) + (1 - lac) + (4 - alb) * 2.5 + (3 - po4) * 0.6
-            ag_corr = (na - (cl + hco3)) + (2.5 * (4.0 - alb))
+# --- HİBRİT KLİNİK DOĞRULAMA FORMU (MANUAL OVERRIDE) ---
+# Resim yüklensin veya yüklenmesin, hekimin her zaman değerleri girip motoru çalıştırma hakkı vardır.
+st.divider()
+st.subheader("🔍 Klinik Doğrulama ve Teşhis")
+st.write("Makinenin okuyabildiği değerler aşağıya otomatik dolduruldu. Eksik veya hatalı olanları düzeltip motoru çalıştırın.")
 
-            diagnostic_report = analyze_acid_base(ph, pco2, hco3)
+with st.form("klinik_dogrulama_formu"):
+    c1, c2, c3, c4 = st.columns(4)
+    # OCR pH'ı saçma sapan bir şey okursa (örn. 1913) güvenli varsayılana dön
+    safe_ph = d['ph'] if d['ph'] and 6.8 < d['ph'] < 7.8 else 7.40
+    ph = c1.number_input("pH", value=float(safe_ph), format="%.3f", step=0.01)
+    pco2 = c2.number_input("pCO2", value=float(d['pco2'] if d['pco2'] else 40.0), step=1.0)
+    hco3 = c3.number_input("HCO3", value=float(d['hco3'] if d['hco3'] else 24.0), step=1.0)
+    po2 = c4.number_input("pO2", value=float(d['po2'] if d['po2'] else 90.0), step=1.0)
+    
+    c5, c6, c7, c8 = st.columns(4)
+    na = c5.number_input("Na", value=float(d['na'] if d['na'] else 140.0), step=1.0)
+    cl = c6.number_input("Cl", value=float(d['cl'] if d['cl'] else 104.0), step=1.0)
+    lac = c7.number_input("Laktat", value=float(d['lactate'] if d['lactate'] else 1.0), step=0.1)
+    po4 = c8.number_input("Fosfat", value=float(d['po4'] if d['po4'] else 3.0), step=0.1)
+    
+    submit_btn = st.form_submit_button("🩺 Gobseck Tanı Motorunu Çalıştır", type="primary", use_container_width=True)
 
-            # --- SONUÇ EKRANI ---
-            st.success("✅ Analiz ve Teşhis Tamamlandı")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("pH", ph)
-            col2.metric("pCO2", pco2)
-            col3.metric("HCO3", hco3)
-            
-            st.divider()
-            
-            st.subheader("📋 Klinik Teşhis Raporu")
-            for line in diagnostic_report:
-                st.write(line)
-            
-            st.divider()
-            
-            st.subheader("🧪 Stewart & İleri Fizyoloji")
-            st.write(f"**Stewart cBE (Ecf):** {cbe:.2f} mmol/L")
-            st.write(f"**A-a Gradient:** {aa_grad:.1f} mmHg (Beklenen: <{(age+10)/4:.1f})")
-            st.write(f"**Albümin Düzeltilmiş Anyon Açığı:** {ag_corr:.1f} mmol/L")
+# --- MOTORUN ÇALIŞMASI VE SONUÇLAR ---
+if submit_btn:
+    with st.spinner("Fizyolojik Denge Analiz Ediliyor..."):
+        # İLERİ DÜZEY HESAPLAMALAR
+        aa_grad = (((fio2_pct/100) * 713) - (1.2 * pco2)) - po2
+        cbe = (na - cl - 38) + (1 - lac) + (4 - alb) * 2.5 + (3 - po4) * 0.6
+        ag_corr = (na - (cl + hco3)) + (2.5 * (4.0 - alb))
+
+        diagnostic_report = analyze_acid_base(ph, pco2, hco3)
+
+        # SONUÇ EKRANI
+        st.success("✅ Teşhis Raporu Hazır")
+        
+        st.subheader("📋 Klinik Karar Defteri")
+        for line in diagnostic_report:
+            st.info(line)
+        
+        st.divider()
+        
+        st.subheader("🧪 Stewart & İleri Fizyoloji")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Stewart cBE (Ecf)", f"{cbe:.2f} mmol/L")
+        m2.metric("A-a Gradient", f"{aa_grad:.1f} mmHg", delta=f"Beklenen: <{(age+10)/4:.1f}", delta_color="off")
+        m3.metric("Düzeltilmiş Anyon Açığı", f"{ag_corr:.1f} mmol/L")
