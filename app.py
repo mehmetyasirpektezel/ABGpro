@@ -28,8 +28,16 @@ patterns = {
     'cbe': [r'cBase\s*\(Ecf\)', r'cBE', r'BE\(B\)', r'BE', r'Base\s*Excess', r'Baz\s*Fazlas']
 }
 
-# --- GÖRÜNTÜ İŞLEME ---
+# --- GÖRÜNTÜ İŞLEME (RAM KORUMALI) ---
 def clean_clinical_image(image):
+    # 1. RAM Patlamasını Önleyen Güvenlik Valfi (Büyük fotoğrafları sınırla)
+    max_width = 1500
+    height, width = image.shape[:2]
+    if width > max_width:
+        ratio = max_width / width
+        image = cv2.resize(image, (max_width, int(height * ratio)), interpolation=cv2.INTER_AREA)
+
+    # 2. Standart İşleme (Artık çökme yapmaz)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     scaled = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_LANCZOS4)
     return cv2.GaussianBlur(scaled, (3, 3), 0)
@@ -55,7 +63,6 @@ def analyze_acid_base(ph, pco2, hco3, na, cl, alb):
         has_hagma = True
         report.append(f"🩸 **Metabolik Yolak:** Albümin düzeltilmiş Anyon Açığı yüksek ({ag_corr:.1f} > 12). **Yüksek Anyon Açıklı Metabolik Asidoz (HAGMA)** mevcut.")
         
-        # Bikarbonat Açığı (ΔAG - ΔHCO3) Analizi
         delta_ag = ag_corr - 12
         delta_hco3 = 24 - hco3
         delta_gap = delta_ag - delta_hco3
@@ -67,7 +74,6 @@ def analyze_acid_base(ph, pco2, hco3, na, cl, alb):
             report.append("🔍 **Miks Bozukluk:** Bikarbonat açığı < -6. Eşzamanlı **Normal Anyon Açıklı (Hiperkloremik) Metabolik Asidoz** tespit edildi.")
 
     # 3. SOLUNUMSAL YOLAK VE BİRİNCİL BOZUKLUK
-    # pH 7.36-7.44 arasında olsa bile pCO2 ve HCO3 kaymışsa süreci tetikleriz (Peltezel Yaklaşımı)
     if ph < 7.36 or (7.36 <= ph < 7.40 and (pco2 > 44 or hco3 < 22)):
         if pco2 > 42 and hco3 >= 22:
             report.append("🫁 **Birincil Sürücü:** Solunumsal Asidoz")
@@ -149,7 +155,7 @@ if uploaded_file is not None:
 # --- HİBRİT KLİNİK DOĞRULAMA FORMU ---
 st.divider()
 st.subheader("🔍 Klinik Doğrulama ve Teşhis")
-st.write("Makinenin okuyabildiği değerler (cihazın 37°C standart ölçümleri) aşağıya dolduruldu. Eksik olanları tamamlayıp motoru çalıştırın.")
+st.write("Makinenin okuyabildiği değerler aşağıya dolduruldu. Eksik olanları tamamlayıp motoru çalıştırın.")
 
 with st.form("klinik_dogrulama_formu"):
     c1, c2, c3, c4 = st.columns(4)
@@ -173,11 +179,9 @@ with st.form("klinik_dogrulama_formu"):
 if submit_btn:
     with st.spinner("Stewart ve Fizyolojik Denge Analiz Ediliyor..."):
         
-        # 1. TEMEL HESAPLAMALAR
         aa_grad = (((fio2_pct/100) * 713) - (1.2 * pco2)) - po2
         ag_corr = (na - (cl + hco3)) + (2.5 * (4.0 - alb))
         
-        # 2. STEWART HESAPLAMALARI
         cbe_hesaplanan = hco3 - 24.8 + (16.2 * (ph - 7.4))
         
         dsid_nacl = (na - cl) - 38
@@ -186,17 +190,14 @@ if submit_btn:
         dsid_alb = (4 - alb) * 2.5
         dsid_total = dsid_nacl + dsid_lac + dsid_po4 + dsid_alb
 
-        # 3. KLİNİK TEŞHİS RAPORU (Düzeltilmiş Yolaklarla)
         diagnostic_report = analyze_acid_base(ph, pco2, hco3, na, cl, alb)
 
-        # --- SONUÇ EKRANI ---
         st.success("✅ Teşhis Raporu Hazır")
         
         st.subheader("📋 Klinik Karar Defteri")
         for line in diagnostic_report:
             st.info(line)
             
-        # --- TERMOREGÜLASYON PANeli ---
         if temp != 37.0:
             ph_t = ph - (0.0146 + 0.065 * (ph - 7.40)) * (temp - 37.0)
             pco2_t = pco2 * (10 ** (0.021 * (temp - 37.0)))
@@ -211,7 +212,6 @@ if submit_btn:
         
         st.divider()
         
-        # STEWART (ΔSID) DETAYLI ANALİZİ
         st.subheader("🔬 Stewart (ΔSID) Detaylı Analizi")
         
         col_cbe1, col_cbe2 = st.columns(2)
